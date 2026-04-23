@@ -126,7 +126,6 @@ def test_chunk_fwd_o(
         v=v,
         g=g,
         chunk_size=chunk_size,
-        states_in_fp32=True,
     )
     
     # reference output
@@ -193,7 +192,6 @@ def test_chunk_fwd_o_gqa(
         v=v,
         g=g,
         chunk_size=chunk_size,
-        states_in_fp32=True,
     )
     
     # naive reference (need to handle GQA)
@@ -292,7 +290,6 @@ def test_chunk_fwd_o_with_h0(
         g=g,
         h0=h0,
         chunk_size=chunk_size,
-        states_in_fp32=True,
     )
     
     # naive reference with h0
@@ -395,7 +392,6 @@ def test_chunk_fwd_o_non_divisible(
         v=v,
         g=g,
         chunk_size=chunk_size,
-        states_in_fp32=True,
     )
     
     ref = naive_chunk_fwd_o(
