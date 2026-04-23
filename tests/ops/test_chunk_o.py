@@ -19,7 +19,7 @@ def naive_chunk_fwd_o(
     k: torch.Tensor,
     v: torch.Tensor,
     h: torch.Tensor,
-    g: torch.Tensor | None = None,
+    g: torch.Tensor,
     scale: float | None = None,
     chunk_size: int = 64,
 ):
@@ -36,6 +36,7 @@ def naive_chunk_fwd_o(
     k = k.to(torch.float32)
     v = v.to(torch.float32)
     h = h.to(torch.float32)
+    g = g.to(torch.float32)
     
     o = torch.zeros(B, T, HV, V, dtype=torch.float32, device=q.device)
     
@@ -44,6 +45,7 @@ def naive_chunk_fwd_o(
             q_h = q[i_b, :, i_h // (HV // H), :]
             k_h = k[i_b, :, i_h // (HV // H), :]
             v_h = v[i_b, :, i_h, :]
+            g_h = g[i_b, :, i_h]
             
             for i_t in range(NT):
                 t_start = i_t * BT
@@ -53,6 +55,7 @@ def naive_chunk_fwd_o(
                 q_chunk = q_h[t_start:t_end]
                 k_chunk = k_h[t_start:t_end]
                 v_chunk = v_h[t_start:t_end]
+                g_chunk = g_h[t_start:t_end]
                 
                 A = torch.matmul(q_chunk, k_chunk.transpose(-1, -2))
                 causal_mask = torch.tril(torch.ones(actual_BT, actual_BT, device=q.device))
@@ -60,13 +63,10 @@ def naive_chunk_fwd_o(
                 
                 h_chunk = h[i_b, i_t, i_h // (HV // H)]
                 o_inter = torch.matmul(q_chunk, h_chunk)
+                o_inter = o_inter * torch.exp(g_chunk).unsqueeze(-1)
                 
-                if g is not None:
-                    g_h = g[i_b, :, i_h].to(torch.float32)
-                    g_chunk = g_h[t_start:t_end]
-                    o_inter = o_inter * torch.exp(g_chunk).unsqueeze(-1)
-                    g_diff = g_chunk.unsqueeze(-1) - g_chunk.unsqueeze(-2)
-                    A = A * torch.exp(g_diff)
+                g_diff = g_chunk.unsqueeze(-1) - g_chunk.unsqueeze(-2)
+                A = A * torch.exp(g_diff)
                 
                 o_intra = torch.matmul(A, v_chunk)
                 o[i_b, t_start:t_end, i_h, :] = scale * (o_inter + o_intra)
@@ -75,17 +75,16 @@ def naive_chunk_fwd_o(
 
 
 @pytest.mark.parametrize(
-    ('B', 'T', 'H', 'D', 'V', 'chunk_size', 'use_gate', 'dtype'),
+    ('B', 'T', 'H', 'D', 'V', 'chunk_size', 'dtype'),
     [
-        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-chunk{}-gate{}-{}".format(*test))
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-chunk{}-{}".format(*test))
         for test in [
-            (1, 64, 1, 64, 64, 64, False, torch.float32),
-            (2, 128, 4, 64, 64, 64, False, torch.float32),
-            (2, 256, 4, 64, 64, 64, True, torch.float32),
-            (1, 128, 2, 32, 64, 32, False, torch.float32),
-            (2, 512, 8, 64, 128, 64, True, torch.float32),
-            (1, 256, 4, 64, 64, 64, False, torch.float16),
-            (2, 512, 8, 64, 128, 64, True, torch.float16),
+            (1, 64, 1, 64, 64, 64, torch.float32),
+            (2, 128, 4, 64, 64, 64, torch.float32),
+            (2, 256, 4, 64, 64, 64, torch.float32),
+            (2, 512, 8, 64, 128, 64, torch.float32),
+            (1, 256, 4, 64, 64, 64, torch.float16),
+            (2, 512, 8, 64, 128, 64, torch.float16),
         ]
     ],
 )
@@ -96,7 +95,6 @@ def test_chunk_fwd_o(
     D: int,
     V: int,
     chunk_size: int,
-    use_gate: bool,
     dtype: torch.dtype,
 ):
     torch.manual_seed(42)
@@ -104,11 +102,7 @@ def test_chunk_fwd_o(
     q = torch.randn((B, T, H, D), dtype=dtype, device=device)
     k = torch.randn((B, T, H, D), dtype=dtype, device=device)
     v = torch.randn((B, T, H, V), dtype=dtype, device=device)
-    
-    if use_gate:
-        g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device=device))
-    else:
-        g = None
+    g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device=device))
     
     scale = D ** -0.5
     
