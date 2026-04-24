@@ -9,8 +9,8 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fla.ops.common.chunk_h import chunk_fwd_h
-from fla.ops.common.chunk_o import chunk_fwd_o
+from fla.ops.common.chunk_h import chunk_fwd_h, chunk_bwd_dh
+from fla.ops.common.chunk_o import chunk_fwd_o, chunk_bwd_dqkwg
 from fla.utils import assert_close, device
 
 
@@ -134,3 +134,98 @@ def test_chunk_fwd_o(
     )
     
     assert_close('o', ref, tri, 0.005)
+
+
+@pytest.mark.parametrize(
+    ('B', 'T', 'H', 'D', 'V', 'chunk_size', 'dtype'),
+    [
+        pytest.param(*test, id="B{}-T{}-H{}-D{}-V{}-chunk{}-{}".format(*test))
+        for test in [
+            (1, 64, 1, 64, 64, 64, torch.float32),
+            (2, 128, 4, 64, 64, 64, torch.float32),
+            (2, 256, 4, 64, 64, 64, torch.float32),
+            (2, 512, 8, 64, 128, 64, torch.float32),
+            (1, 256, 4, 64, 64, 64, torch.float16),
+            (2, 512, 8, 64, 128, 64, torch.float16),
+        ]
+    ],
+)
+def test_chunk_bwd_dqkwg(
+    B: int,
+    T: int,
+    H: int,
+    D: int,
+    V: int,
+    chunk_size: int,
+    dtype: torch.dtype,
+):
+    torch.manual_seed(42)
+    
+    q = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    k = torch.randn((B, T, H, D), dtype=dtype, device=device).requires_grad_()
+    v = torch.randn((B, T, H, V), dtype=dtype, device=device).requires_grad_()
+    g = F.logsigmoid(torch.randn((B, T, H), dtype=dtype, device=device)).requires_grad_()
+    
+    scale = D ** -0.5
+    
+    h, _ = chunk_fwd_h(
+        k=k,
+        v=v,
+        g=g,
+        chunk_size=chunk_size,
+    )
+    
+    o_tri = chunk_fwd_o(
+        q=q,
+        k=k,
+        v=v,
+        h=h,
+        g=g,
+        scale=scale,
+        chunk_size=chunk_size,
+    )
+    
+    do = torch.randn_like(o_tri)
+    
+    dh, _ = chunk_bwd_dh(
+        q=q,
+        k=k,
+        v=v,
+        do=do,
+        h0=None,
+        dht=None,
+        scale=scale,
+        g=g,
+        chunk_size=chunk_size,
+    )
+    
+    dq_tri, dk_tri, _, dg_tri = chunk_bwd_dqkwg(
+        q=q,
+        k=k,
+        v=v,
+        do=do,
+        h=h,
+        dh=dh,
+        g=g,
+        scale=scale,
+        chunk_size=chunk_size,
+    )
+    
+    o_ref = naive_chunk_fwd_o(
+        q=q,
+        k=k,
+        v=v,
+        h=h,
+        g=g,
+        scale=scale,
+        chunk_size=chunk_size,
+    )
+    
+    ((o_ref * do).sum()).backward()
+    ref_dq = q.grad.clone()
+    ref_dk = k.grad.clone()
+    ref_dg = g.grad.clone()
+    
+    assert_close('dq', ref_dq, dq_tri, 0.01)
+    assert_close('dk', ref_dk, dk_tri, 0.01)
+    assert_close('dg', ref_dg, dg_tri, 0.01)
